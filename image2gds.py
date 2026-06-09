@@ -2,7 +2,7 @@
 """
 Created on Jun 08 13:49 2026
 
-@author: muehlenstaedt, mancio
+@author: muehlenstaedt, mancio, claude 
 """
 
 #Import dependencies
