@@ -17,10 +17,7 @@ from tqdm import tqdm
 def floyd_steinberg(data: np.ndarray) -> np.ndarray:
     """
     Floyd-Steinberg dithering.
-    Diffuses quantization error to 4 neighbours:
-        * →  7/16
-        ↙ ↓  ↘
-        3/16  5/16  1/16
+    Diffuses quantization error to 4 neighbours.
     Input : float32 array in [0, 255]
     Output: uint8 binary array (0 or 1)
     """
