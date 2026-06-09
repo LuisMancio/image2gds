@@ -1,0 +1,5 @@
+gdshelpers==1.2.1
+numpy==2.4.6
+Pillow==12.2.0
+Shapely==1.8.5
+tqdm==4.67.3
