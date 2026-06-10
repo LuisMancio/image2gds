@@ -67,15 +67,15 @@ def simple_threshold(data: np.ndarray, threshold: int = 128) -> np.ndarray:
 
 # ── Configuration ───────────────────────────────────────────────────────────
 
-IMAGE_FILE  = "IAP_logo.png"
-OUTPUT_FILE = "IAP_logo_threshold_mode.gds"
+IMAGE_FILE  = "CGH_equation.png"
+OUTPUT_FILE = "CGH_equation.gds"
 PIXEL_SIZE  = 2        # micrometers per pixel
 BORDER      = 5        # border offset in micrometers
 GDS_LAYER   = 1        # layer for image pixels
-BORDER_LAYER= 4        # layer for the chip border
+BORDER_LAYER= 2        # layer for the chip border
 
 # Choose dithering method: 'floyd_steinberg' | 'ordered' | 'threshold'
-DITHER_MODE = "floyd_steinberg"
+DITHER_MODE = "threshold"
 
 # ── Load & process image ────────────────────────────────────────────────────
 
@@ -96,13 +96,17 @@ rows, cols = data.shape
 # ── Build GDS ───────────────────────────────────────────────────────────────
 
 cell = Cell('Chip_1')
-
+cell_rectangle=Cell('Rect_only')
+rect=Polygon([(0, 0), (PIXEL_SIZE, 0), (PIXEL_SIZE, PIXEL_SIZE), (0, PIXEL_SIZE)])
+cell_rectangle.add_to_layer( GDS_LAYER, rect)
 # Border rectangle
+"""
 w = cols * PIXEL_SIZE + 2 * BORDER
 h = rows * PIXEL_SIZE + 2 * BORDER
 border_rect = Polygon([(0, 0), (w, 0), (w, h), (0, h)])
 cell.add_to_layer(BORDER_LAYER, border_rect)
 
+"""
 # Draw pixels
 total_pixels = rows * cols
 with tqdm(total=total_pixels, desc=f"Rendering ({DITHER_MODE})") as pbar:
@@ -117,7 +121,7 @@ with tqdm(total=total_pixels, desc=f"Rendering ({DITHER_MODE})") as pbar:
                     (x0 + PIXEL_SIZE, y0 + PIXEL_SIZE),
                     (x0,              y0 + PIXEL_SIZE),
                 ])
-                cell.add_to_layer(GDS_LAYER, rect)
+                cell.add_cell(cell_rectangle, origin=(x0,y0))
             pbar.update(1)
 
 cell.save(OUTPUT_FILE)
