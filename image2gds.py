@@ -5,20 +5,27 @@ Created on Jun 08 13:49 2026
 @author: muehlenstaedt, mancio, claude 
 """
 
-#Import dependencies
+# -*- coding: utf-8 -*-
+"""Convert an image file to a GDS file.
+Pixels are merged into large polygons via shapely.unary_union
+for compact file size — no gdspy required.
+"""
+
+# ── Dependencies ──────────────────────────────────────────────────────────────
 from gdshelpers.geometry.chip import Cell
-from shapely.geometry import Polygon
+from shapely.geometry import Polygon, box
+from shapely.ops import unary_union
 import numpy as np
 from PIL import Image
 from tqdm import tqdm
 
-# ── Dithering algorithms ────────────────────────────────────────────────────
+# ── Dithering algorithms ──────────────────────────────────────────────────────
 
 def floyd_steinberg(data: np.ndarray) -> np.ndarray:
     """
     Floyd-Steinberg dithering.
     Diffuses quantization error to 4 neighbours.
-    Input : float32 array in [0, 255]
+    Input : uint8 array in [0, 255]
     Output: uint8 binary array (0 or 1)
     """
     img = data.astype(np.float32).copy()
@@ -36,7 +43,7 @@ def floyd_steinberg(data: np.ndarray) -> np.ndarray:
             if i + 1 < rows:
                 if j - 1 >= 0:
                     img[i + 1, j - 1] += err * 3 / 16
-                img[i + 1, j    ] += err * 5 / 16
+                img[i + 1, j    ]     += err * 5 / 16
                 if j + 1 < cols:
                     img[i + 1, j + 1] += err * 1 / 16
 
@@ -45,7 +52,7 @@ def floyd_steinberg(data: np.ndarray) -> np.ndarray:
 
 def ordered_dither_4x4(data: np.ndarray) -> np.ndarray:
     """
-    Ordered (Bayer) 4×4 dithering.
+    Ordered (Bayer) 4x4 dithering.
     Good for a regular, patterned halftone look.
     """
     bayer = np.array([
@@ -53,7 +60,7 @@ def ordered_dither_4x4(data: np.ndarray) -> np.ndarray:
         [12,  4, 14,  6],
         [ 3, 11,  1,  9],
         [15,  7, 13,  5],
-    ], dtype=np.float32) / 16.0 * 255.0   # scale to [0, 255]
+    ], dtype=np.float32) / 16.0 * 255.0
 
     rows, cols = data.shape
     tiled = np.tile(bayer, (rows // 4 + 1, cols // 4 + 1))[:rows, :cols]
@@ -61,27 +68,27 @@ def ordered_dither_4x4(data: np.ndarray) -> np.ndarray:
 
 
 def simple_threshold(data: np.ndarray, threshold: int = 128) -> np.ndarray:
-    """Original binary threshold (no dithering)."""
+    """Binary threshold (no dithering)."""
     return (data > threshold).astype(np.uint8)
 
 
-# ── Configuration ───────────────────────────────────────────────────────────
+# ── Configuration ─────────────────────────────────────────────────────────────
 
-IMAGE_FILE  = "CGH_equation.png"
-OUTPUT_FILE = "CGH_equation.gds"
-PIXEL_SIZE  = 2        # micrometers per pixel
-BORDER      = 5        # border offset in micrometers
-GDS_LAYER   = 1        # layer for image pixels
-BORDER_LAYER= 2        # layer for the chip border
+IMAGE_FILE   = "CGH_IAP.png"
+OUTPUT_FILE  = "CGH_IAP.gds"
+PIXEL_SIZE   = 2      # micrometers per pixel
+BORDER       = 5      # border offset in micrometers
+GDS_LAYER    = 2      # layer for image pixels
+BORDER_LAYER = 2      # layer for chip border
 
 # Choose dithering method: 'floyd_steinberg' | 'ordered' | 'threshold'
-DITHER_MODE = "threshold"
+DITHER_MODE  = "threshold"
 
-# ── Load & process image ────────────────────────────────────────────────────
+# ── Load & process image ──────────────────────────────────────────────────────
 
 img      = Image.open(IMAGE_FILE)
 img_gray = img.convert('L')
-data_raw = np.array(img_gray)          # uint8, shape (rows, cols)
+data_raw = np.array(img_gray)         # uint8, shape (rows, cols)
 
 if DITHER_MODE == "floyd_steinberg":
     data = floyd_steinberg(data_raw)
@@ -90,39 +97,61 @@ elif DITHER_MODE == "ordered":
 else:
     data = simple_threshold(data_raw)
 
-data = np.flipud(data)                 # flip so origin is bottom-left
+data = np.flipud(data)                # flip so origin is bottom-left
 rows, cols = data.shape
 
-# ── Build GDS ───────────────────────────────────────────────────────────────
+print(f"Image        : {rows} x {cols} = {rows*cols} total pixels")
+
+# ── Build pixel polygons row by row and merge ─────────────────────────────────
+# Merging is done row by row to keep memory usage under control.
+# Each row produces one union, then all row-unions are merged at the end.
+
+print("Merging polygons...")
+row_unions = []
+
+with tqdm(total=rows, desc=f"Merging rows ({DITHER_MODE})") as pbar:
+    for i in range(rows):
+        cols_on = np.where(data[i] > 0)[0]
+        if len(cols_on) == 0:
+            pbar.update(1)
+            continue
+
+        # Build all pixel boxes for this row at once
+        row_boxes = [
+            box(
+                BORDER + j * PIXEL_SIZE,
+                BORDER + i * PIXEL_SIZE,
+                BORDER + j * PIXEL_SIZE + PIXEL_SIZE,
+                BORDER + i * PIXEL_SIZE + PIXEL_SIZE,
+            )
+            for j in cols_on
+        ]
+        row_unions.append(unary_union(row_boxes))
+        pbar.update(1)
+
+print("Final union across rows...")
+merged = unary_union(row_unions)
+
+# ── Write GDS ─────────────────────────────────────────────────────────────────
 
 cell = Cell('Chip_1')
-cell_rectangle=Cell('Rect_only')
-rect=Polygon([(0, 0), (PIXEL_SIZE, 0), (PIXEL_SIZE, PIXEL_SIZE), (0, PIXEL_SIZE)])
-cell_rectangle.add_to_layer( GDS_LAYER, rect)
+
 # Border rectangle
 """
 w = cols * PIXEL_SIZE + 2 * BORDER
 h = rows * PIXEL_SIZE + 2 * BORDER
 border_rect = Polygon([(0, 0), (w, 0), (w, h), (0, h)])
 cell.add_to_layer(BORDER_LAYER, border_rect)
-
 """
-# Draw pixels
-total_pixels = rows * cols
-with tqdm(total=total_pixels, desc=f"Rendering ({DITHER_MODE})") as pbar:
-    for i in range(rows):
-        for j in range(cols):
-            if data[i, j] > 0:
-                x0 = BORDER + j * PIXEL_SIZE
-                y0 = BORDER + i * PIXEL_SIZE
-                rect = Polygon([
-                    (x0,              y0),
-                    (x0 + PIXEL_SIZE, y0),
-                    (x0 + PIXEL_SIZE, y0 + PIXEL_SIZE),
-                    (x0,              y0 + PIXEL_SIZE),
-                ])
-                cell.add_cell(cell_rectangle, origin=(x0,y0))
-            pbar.update(1)
+
+# Add merged geometry — can be a Polygon or MultiPolygon
+print("Writing GDS...")
+if merged.geom_type == 'Polygon':
+    cell.add_to_layer(GDS_LAYER, merged)
+else:
+    # MultiPolygon: add each part individually
+    for geom in tqdm(merged.geoms, desc="Writing polygons"):
+        cell.add_to_layer(GDS_LAYER, geom)
 
 cell.save(OUTPUT_FILE)
 print(f"Saved → {OUTPUT_FILE}  ({rows}×{cols} px, mode={DITHER_MODE})")
