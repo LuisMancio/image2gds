@@ -7,14 +7,13 @@ Created on Jun 08 13:49 2026
 
 # -*- coding: utf-8 -*-
 """Convert an image file to a GDS file.
-Pixels are merged into large polygons via shapely.unary_union
-for compact file size — no gdspy required.
+Pixels are merged into large rectangles via a scanline + vertical RLE algorithm.
+Much faster than shapely.unary_union — no union calls needed.
 """
 
 # ── Dependencies ──────────────────────────────────────────────────────────────
 from gdshelpers.geometry.chip import Cell
-from shapely.geometry import Polygon, box
-from shapely.ops import unary_union
+from shapely.geometry import box
 import numpy as np
 from PIL import Image
 from tqdm import tqdm
@@ -72,17 +71,65 @@ def simple_threshold(data: np.ndarray, threshold: int = 128) -> np.ndarray:
     return (data > threshold).astype(np.uint8)
 
 
+# ── Scanline rectangle builder ────────────────────────────────────────────────
+
+def build_rectangles_scanline(data: np.ndarray, pixel_size: float, border: float) -> list:
+    """
+    Convert binary image to non-overlapping rectangles without any union calls.
+
+    Per row: np.diff finds horizontal runs in O(cols) vectorized.
+    Runs are extended vertically as long as the same (col_start, col_end) span
+    continues in the next row; when a run breaks, one box is emitted.
+
+    Result: far fewer Shapely objects than one-box-per-pixel, and zero unary_union.
+    """
+    rows, _ = data.shape
+    boxes  = []
+    active = {}  # (col_start, col_end) -> row_start_index
+
+    for i in range(rows):
+        padded = np.concatenate(([0], data[i], [0]))
+        diffs  = np.diff(padded.astype(np.int8))
+        starts = np.where(diffs == 1)[0]
+        ends   = np.where(diffs == -1)[0]
+        current = set(zip(starts.tolist(), ends.tolist()))
+
+        # Close runs that ended in this row
+        for run in list(active):
+            if run not in current:
+                rs = active.pop(run)
+                s, e = run
+                boxes.append(box(
+                    border + s * pixel_size, border + rs * pixel_size,
+                    border + e * pixel_size, border + i  * pixel_size,
+                ))
+
+        # Open runs that are new in this row
+        for run in current:
+            if run not in active:
+                active[run] = i
+
+    # Flush runs still open at the last row
+    for (s, e), rs in active.items():
+        boxes.append(box(
+            border + s * pixel_size, border + rs   * pixel_size,
+            border + e * pixel_size, border + rows * pixel_size,
+        ))
+
+    return boxes
+
+
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-IMAGE_FILE   = "CGH_IAP.png"
-OUTPUT_FILE  = "CGH_IAP.gds"
-PIXEL_SIZE   = 2      # micrometers per pixel
+IMAGE_FILE   = "IAP_logo.png"
+OUTPUT_FILE  = "IAP_logo.gds"
+PIXEL_SIZE   = 2*13      # micrometers per pixel
 BORDER       = 5      # border offset in micrometers
-GDS_LAYER    = 2      # layer for image pixels
+GDS_LAYER    = 8     # layer for image pixels
 BORDER_LAYER = 2      # layer for chip border
 
 # Choose dithering method: 'floyd_steinberg' | 'ordered' | 'threshold'
-DITHER_MODE  = "threshold"
+DITHER_MODE  = "ordered"
 
 # ── Load & process image ──────────────────────────────────────────────────────
 
@@ -102,35 +149,11 @@ rows, cols = data.shape
 
 print(f"Image        : {rows} x {cols} = {rows*cols} total pixels")
 
-# ── Build pixel polygons row by row and merge ─────────────────────────────────
-# Merging is done row by row to keep memory usage under control.
-# Each row produces one union, then all row-unions are merged at the end.
+# ── Build rectangles via scanline ─────────────────────────────────────────────
 
-print("Merging polygons...")
-row_unions = []
-
-with tqdm(total=rows, desc=f"Merging rows ({DITHER_MODE})") as pbar:
-    for i in range(rows):
-        cols_on = np.where(data[i] > 0)[0]
-        if len(cols_on) == 0:
-            pbar.update(1)
-            continue
-
-        # Build all pixel boxes for this row at once
-        row_boxes = [
-            box(
-                BORDER + j * PIXEL_SIZE,
-                BORDER + i * PIXEL_SIZE,
-                BORDER + j * PIXEL_SIZE + PIXEL_SIZE,
-                BORDER + i * PIXEL_SIZE + PIXEL_SIZE,
-            )
-            for j in cols_on
-        ]
-        row_unions.append(unary_union(row_boxes))
-        pbar.update(1)
-
-print("Final union across rows...")
-merged = unary_union(row_unions)
+print("Building rectangles (scanline)...")
+rectangles = build_rectangles_scanline(data, PIXEL_SIZE, BORDER)
+print(f"Generated {len(rectangles)} rectangles  ({rows}×{cols} px, mode={DITHER_MODE})")
 
 # ── Write GDS ─────────────────────────────────────────────────────────────────
 
@@ -144,14 +167,9 @@ border_rect = Polygon([(0, 0), (w, 0), (w, h), (0, h)])
 cell.add_to_layer(BORDER_LAYER, border_rect)
 """
 
-# Add merged geometry — can be a Polygon or MultiPolygon
 print("Writing GDS...")
-if merged.geom_type == 'Polygon':
-    cell.add_to_layer(GDS_LAYER, merged)
-else:
-    # MultiPolygon: add each part individually
-    for geom in tqdm(merged.geoms, desc="Writing polygons"):
-        cell.add_to_layer(GDS_LAYER, geom)
+for rect in tqdm(rectangles, desc="Writing polygons"):
+    cell.add_to_layer(GDS_LAYER, rect)
 
 cell.save(OUTPUT_FILE)
-print(f"Saved → {OUTPUT_FILE}  ({rows}×{cols} px, mode={DITHER_MODE})")
+print(f"Saved → {OUTPUT_FILE}")
